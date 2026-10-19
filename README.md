@@ -123,8 +123,9 @@ Claude consults `.okf/` before a task and writes back after. *Enforced:* add
 `upkeep: enforced` to `.okf/index.md`'s frontmatter to arm the plugin's dormant
 `Stop` hook, which blocks finishing when tracked files changed but nothing under
 `.okf/` did. If the bundle documents git repos checked out inside the project,
-add `recursive: true` so the hook finds them and counts their
-uncommitted changes too. `OKF_HOOK=off` overrides any bundle. Details:
+add `recursive: true` (or a depth, `recursive: 3`) so the hook finds them and
+counts their uncommitted changes too. Depth is how many directory levels below
+the project root a repo's directory may sit (`repos/app` is 2); `true` means 6. `OKF_HOOK=off` overrides any bundle. Details:
 [stop-hook concept](.okf/components/stop-hook.md).
 
 ## What's inside

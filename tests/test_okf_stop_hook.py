@@ -142,9 +142,9 @@ class TestStopHook(unittest.TestCase):
         self.assertIn("nothing under .okf/ changed", r.stdout)
         self.assertIn("only for a lifecycle event", r.stdout)
 
-    def set_recursive(self, on: bool = True) -> None:
+    def set_recursive(self, value: str | None = "true") -> None:
         """Declare recursive in the root index and commit it with gitignored repos/."""
-        flag = "recursive: true\n" if on else ""
+        flag = f"recursive: {value}\n" if value is not None else ""
         (self.repo / ".okf/index.md").write_text(f"---\nupkeep: enforced\n{flag}---\n# Bundle\n")
         (self.repo / ".gitignore").write_text("repos/\n")
         sh(self.repo, "git", "add", "-A")
@@ -176,7 +176,7 @@ class TestStopHook(unittest.TestCase):
         return r.stdout
 
     def test_recursive_absent_ignores_nested(self) -> None:
-        self.set_recursive(False)
+        self.set_recursive(None)
         self.dirty(self.add_nested("repos/app"))
         self.assertFalse(self.run_hook())
 
@@ -265,12 +265,55 @@ class TestStopHook(unittest.TestCase):
         self.dirty(self.add_nested("repos/back" + chr(92) + "slash"))
         self.assertIn("repos/back" + chr(92) + "slash", json.loads(self.hook_output())["reason"])
 
-    def test_nested_repo_with_own_bundle_change_passes(self) -> None:
+    def test_nested_repo_with_own_bundle_is_excluded(self) -> None:
         self.set_recursive()
-        app = self.dirty(self.add_nested("repos/app"))
+        app = self.add_nested("repos/app")
         (app / ".okf").mkdir()
         (app / ".okf/a.md").write_text("---\ntype: Thing\n---\nA\n")
+        sh(app, "git", "add", "-A")
+        sh(app, "git", "commit", "-qm", "bundle")
+        self.dirty(app)
         self.assertFalse(self.run_hook())
+
+    def add_inner(self) -> None:
+        """repos/app (clean, ignores inner/) with a dirty repos/app/inner."""
+        app = self.add_nested("repos/app")
+        (app / ".gitignore").write_text("inner/\n")
+        sh(app, "git", "add", "-A")
+        sh(app, "git", "commit", "-qm", "ignore inner")
+        self.dirty(self.init_repo(app / "inner"))
+
+    def test_depth_2_sees_repos_app(self) -> None:
+        self.set_recursive("2")
+        self.dirty(self.add_nested("repos/app"))
+        self.assertTrue(self.run_hook())
+
+    def test_depth_2_does_not_see_inner(self) -> None:
+        self.set_recursive("2")
+        self.add_inner()
+        self.assertFalse(self.run_hook())
+
+    def test_depth_3_sees_inner(self) -> None:
+        self.set_recursive("3")
+        self.add_inner()
+        self.assertIn("repos/app/inner", self.hook_output())
+
+    def test_true_reaches_depth_6(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("a/b/c/d/e/app"))
+        self.assertIn("a/b/c/d/e/app", self.hook_output())
+
+    def test_true_stops_at_depth_7(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("a/b/c/d/e/f/app"))
+        self.assertFalse(self.run_hook())
+
+    def test_invalid_recursive_values_disable_discovery(self) -> None:
+        for i, value in enumerate(("0", "yes", "True", "false", "'3'", "-1")):
+            with self.subTest(value=value):
+                self.set_recursive(value)
+                self.dirty(self.add_nested(f"repos/app{i}"))
+                self.assertFalse(self.run_hook())
 
     def test_settings_local_in_nested_repo_passes(self) -> None:
         self.set_recursive()

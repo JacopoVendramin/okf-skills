@@ -38,7 +38,8 @@ checked in order:
    session, so the hook stays quiet.
 
 If the outer repo has tracked changes the hook blocks at once. Only otherwise,
-and only when the frontmatter also carries `recursive: true`, does it look for
+and only when the frontmatter also carries `recursive: true` (or a positive
+integer depth), does it look for
 nested repos (see [Activation](#activation)); their tracked changes count by
 the same rule as gate 5.
 
@@ -70,7 +71,9 @@ setting `OKF_HOOK=off` in their environment.
 A bundle that documents separate git repos checked out *inside* the project
 (say `repos/app/`, each its own repo, gitignored by the outer one) adds
 `recursive: true` to the same frontmatter: its own line, between the first two
-`---` lines, next to `upkeep: enforced`. The hook then finds nested repos by
+`---` lines, next to `upkeep: enforced`. The value is `true` (depth 6) or a
+positive integer `n` (depth n); anything else (`false`, `0`, `yes`, `True`, a
+quoted value) leaves discovery off. The hook then finds nested repos by
 itself, with no list to maintain, and counts their tracked changes like the
 outer repo's. When nested repos contribute changes, the block reason names them
 (paths relative to the project root). Without the key nothing changes. It is
@@ -81,8 +84,10 @@ Order matters for cost: the bundle-touched check runs first, then the outer
 repo's own changes (which block without any discovery), and only then the
 `recursive` flag and the `find`.
 
-Discovery runs `find` for `.git` entries at depth 2 to 6 (nested repos inside
-nested repos are found). The hook timeout is 15 s and an unpruned `find` took
+Discovery runs `find` for `.git` entries. Depth counts the directory levels below
+the project root at which a nested repo's own directory may sit: `app` is 1,
+`repos/app` is 2, `repos/app/inner` is 3 (nested repos inside nested repos are
+found). The search goes to depth + 1 for the `.git` entry. The hook timeout is 15 s and an unpruned `find` took
 over 13 s on a monorepo with dozens of nested worktrees; pruning `.git`,
 `.claude/worktrees`, `node_modules`, `.venv`, `venv`, `target`, `dist`, `build`,
 `.next`, `.turbo`, `.nx` and `__pycache__` brings it under 0.5 s. A hit is
@@ -93,7 +98,8 @@ skipped when it is:
 * a submodule: the outer status already sees its pointer change;
 * a linked worktree of a repo that lives inside the project: ignored for the
   same reason (linked worktrees of repos *outside* the project still count);
-* a repo whose own `.okf/` has uncommitted changes: it was maintained.
+* a repo with its own `.okf/` directory, touched or not: its own enforced hook
+  covers it.
 
 A repo that cannot be inspected is skipped (fail open).
 
@@ -124,7 +130,7 @@ set of required status checks does not change.
   session satisfies gate 6 and silences the hook until it is committed. So does
   touching an unrelated concept: the gate checks that the bundle moved, not
   that the right concept did.
-* Discovery only sees repos whose `.git` sits at depth 2 to 6 and outside the pruned directories. Committed changes in a nested repo are not seen, same as in the outer repo:
+* Discovery only sees repos whose directory sits within the configured depth (default 6) and outside the pruned directories. Committed changes in a nested repo are not seen, same as in the outer repo:
   only uncommitted tracked modifications count.
 * Paths resolve from the session's working directory: a bundle not at
   `./.okf/` (monorepo subdirectory, session launched elsewhere) is never seen.

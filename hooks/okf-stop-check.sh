@@ -44,15 +44,22 @@ JSON
 # the outer repo is dirty: block now, no need to look for nested repos
 [ -n "$(tracked_changes .)" ] && block ""
 # nested-repo discovery is opt-in: `recursive: true` in the same frontmatter
-frontmatter_has 'recursive:[[:space:]]*true' || exit 0
+# `recursive: true` means depth 6, `recursive: <n>` (positive integer) means depth n;
+# any other value leaves discovery off
+recursive=$(awk '/^---[[:space:]]*$/{n++;next} n==1 && /^recursive:[[:space:]]*(true|[1-9][0-9]*)[[:space:]]*$/{v=$0; sub(/^recursive:[[:space:]]*/, "", v); sub(/[[:space:]]*$/, "", v); print v; exit}' .okf/index.md)
+[ -n "$recursive" ] || exit 0
+depth=$recursive
+[ "$depth" = "true" ] && depth=6
 # A separate git repo checked out inside the project (usually gitignored by the
 # outer one) is invisible to the outer status, so find them. The hook timeout is
 # 15 s and a naive find took over 13 s on a monorepo with dozens of nested
 # worktrees; pruning heavy dirs keeps it under 0.5 s. Pruned: .git, Claude Code
 # worktrees (.claude/worktrees), dependency and build output (node_modules, .venv,
-# venv, target, dist, build, .next, .turbo, .nx, __pycache__). Only .git entries at
-# depth 2 to 6 are considered (no -mindepth: it would also disable the prunes
-# above at depth 1; ./.git, the only depth 1 hit, is pruned already).
+# venv, target, dist, build, .next, .turbo, .nx, __pycache__). Depth counts the
+# directory levels below the project root that a nested repo's own directory may sit
+# at: `app` is 1, `repos/app` is 2, `repos/app/inner` is 3. So its .git is searched
+# up to depth + 1 (no -mindepth: it would also disable the prunes above at depth 1;
+# ./.git, the only depth 1 hit, is pruned already).
 # Known gaps: symlinked nested repos are not followed; a nested repo whose own
 # directory is named like a pruned one (build, dist, target, ...) is not found;
 # only the literal lowercase `recursive: true` enables discovery.
@@ -64,14 +71,14 @@ frontmatter_has 'recursive:[[:space:]]*true' || exit 0
 #   2. a submodule: the outer status already sees its pointer change
 #   3. a linked worktree of a repo that lives inside the project: ignored for the
 #      same reason as 1 (linked worktrees of repos OUTSIDE the project still count)
-#   4. a repo with its own .okf/ touched: it was maintained
+#   4. a repo with its own .okf/ bundle, touched or not: its own enforced hook covers it
 root=$(pwd -P)
 realdir() { (cd "$1" 2>/dev/null && pwd -P); }
 outer_common=$(realdir "$(git rev-parse --git-common-dir 2>/dev/null)")
 [ -n "$outer_common" ] || exit 0
 # the loop prints the dirty repos, one per line, and is captured: a pipeline
 # subshell cannot hand variables back
-dirty=$(find . -maxdepth 6 \( -path ./.git -o -path '*/.claude/worktrees' -o -name node_modules -o -name .venv -o -name venv -o -name target -o -name dist -o -name build -o -name .next -o -name .turbo -o -name .nx -o -name __pycache__ \) -prune \
+dirty=$(find . -maxdepth $((depth + 1)) \( -path ./.git -o -path '*/.claude/worktrees' -o -name node_modules -o -name .venv -o -name venv -o -name target -o -name dist -o -name build -o -name .next -o -name .turbo -o -name .nx -o -name __pycache__ \) -prune \
   -o -name .git -print -prune 2>/dev/null | sort |
 while IFS= read -r g; do
   d=${g%/.git}
@@ -81,7 +88,7 @@ while IFS= read -r g; do
   [ -n "$(git -C "$d" rev-parse --show-superproject-working-tree 2>/dev/null)" ] && continue
   gitdir=$(cd "$d" 2>/dev/null && realdir "$(git rev-parse --git-dir 2>/dev/null)") || continue
   if [ "$gitdir" != "$common" ]; then case "$common/" in "$root"/*) continue;; esac; fi
-  if [ -d "$d/.okf" ] && [ -n "$(git -C "$d" status --porcelain -- .okf 2>/dev/null)" ]; then continue; fi
+  [ -d "$d/.okf" ] && continue
   [ -n "$(tracked_changes "$d")" ] && printf '%s\n' "${d#./}"
 done)
 [ -n "$dirty" ] || exit 0

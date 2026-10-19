@@ -44,7 +44,7 @@ fields, unknown types, and broken links — never reject a bundle over them.
   in the surrounding prose, not the link.
 - **Reserved files:** `index.md` (directory listing, no frontmatter, except the
   bundle-root index, which may carry `okf_version` and this plugin's
-  `upkeep: enforced` opt-in flag, plus `recursive: true` to make the hook
+  `upkeep: enforced` opt-in flag, plus `recursive: true` (or a depth `n`: levels below the root, `true` is 6) to make the hook
   watch nested git repos) and `log.md` (ISO-dated history, newest
   first). Never use these names for concepts.
 - **What goes in `log.md`:** lifecycle events only, written in the bundle-root
