@@ -5,7 +5,7 @@ description: Zero-config Python conformance checker and v0.1→v0.2 migrator (PE
 resource: https://github.com/scaccogatto/okf-skills/blob/main/skills/validate/scripts/okf_validate.py
 tags: [python, validator, uv]
 status: stable
-generated: { by: "agent:claude-opus-5-5", at: "2026-10-14T00:00:00Z" }
+generated: { by: "agent:claude-opus-5-5", at: "2026-10-19T00:00:00Z" }
 ---
 
 # Overview

@@ -5,7 +5,7 @@ description: Dormant Stop hook — a no-op unless a bundle opts in to enforced u
 resource: https://github.com/scaccogatto/okf-skills/blob/main/hooks/okf-stop-check.sh
 tags: [bash, hook, enforcement]
 status: stable
-generated: { by: "agent:claude-opus-5-5", at: "2026-10-14T00:00:00Z" }
+generated: { by: "agent:claude-opus-5-5", at: "2026-10-19T00:00:00Z" }
 ---
 
 # Overview
@@ -42,7 +42,9 @@ and only when the frontmatter also carries `recursive: true`, does it look for
 nested repos (see [Activation](#activation)); their tracked changes count by
 the same rule as gate 5.
 
-Only when all six hold does it block, asking the agent to update the matching
+It blocks when gates 1 to 4 hold and either the outer repo or (with
+`recursive: true`) a nested repo has tracked changes while nothing under `.okf/`
+changed, asking the agent to update the matching
 concept before finishing, and to add a `log.md` entry only for a lifecycle
 event.
 
@@ -86,13 +88,18 @@ over 13 s on a monorepo with dozens of nested worktrees; pruning `.git`,
 `.next`, `.turbo`, `.nx` and `__pycache__` brings it under 0.5 s. A hit is
 skipped when it is:
 
-* a worktree of the outer repo (same common git dir): the outer status covers it;
+* a linked worktree of the outer repo (same common git dir): a separate checkout,
+  usually an agent or parallel session with its own hook, deliberately ignored;
 * a submodule: the outer status already sees its pointer change;
-* a linked worktree of a repo that lives inside the project: that repo covers
-  it (linked worktrees of repos *outside* the project still count);
+* a linked worktree of a repo that lives inside the project: ignored for the
+  same reason (linked worktrees of repos *outside* the project still count);
 * a repo whose own `.okf/` has uncommitted changes: it was maintained.
 
 A repo that cannot be inspected is skipped (fail open).
+
+Known gaps: symlinked nested repos are not followed; a nested repo whose own
+directory is named like a pruned one (`build`, `dist`, `target`, ...) is not
+found; only the literal lowercase `recursive: true` enables discovery.
 
 # The CI mirror
 

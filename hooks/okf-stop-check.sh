@@ -10,8 +10,11 @@ input=$(cat)
 printf '%s' "$input" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' && exit 0
 [ "$OKF_HOOK" = "off" ] && exit 0
 [ -f .okf/index.md ] || exit 0
-# the flag must sit inside the frontmatter (between the first two --- lines)
-awk '/^---[[:space:]]*$/{n++;next} n==1 && /^upkeep:[[:space:]]*enforced[[:space:]]*$/{f=1} END{exit !f}' .okf/index.md || exit 0
+# a flag must sit inside the frontmatter (between the first two --- lines)
+frontmatter_has() {
+  awk -v re="^$1[[:space:]]*\$" '/^---[[:space:]]*$/{n++;next} n==1 && $0 ~ re{f=1} END{exit !f}' .okf/index.md
+}
+frontmatter_has 'upkeep:[[:space:]]*enforced' || exit 0
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
 # count only changes to tracked files: an untracked path is not yet a documented
 # asset, and treating it as one made the hook false-fire on tooling dirs (.claude/,
@@ -30,8 +33,7 @@ tracked_changes() {
 block() {
   where=""
   if [ -n "$1" ]; then
-    nested=${1//\\/\\\\}
-    nested=${nested//\"/\\\"}
+    nested=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
     where=" (including changes in nested repos: $nested)"
   fi
   cat <<JSON
@@ -42,7 +44,7 @@ JSON
 # the outer repo is dirty: block now, no need to look for nested repos
 [ -n "$(tracked_changes .)" ] && block ""
 # nested-repo discovery is opt-in: `recursive: true` in the same frontmatter
-awk '/^---[[:space:]]*$/{n++;next} n==1 && /^recursive:[[:space:]]*true[[:space:]]*$/{f=1} END{exit !f}' .okf/index.md || exit 0
+frontmatter_has 'recursive:[[:space:]]*true' || exit 0
 # A separate git repo checked out inside the project (usually gitignored by the
 # outer one) is invisible to the outer status, so find them. The hook timeout is
 # 15 s and a naive find took over 13 s on a monorepo with dozens of nested
@@ -50,28 +52,34 @@ awk '/^---[[:space:]]*$/{n++;next} n==1 && /^recursive:[[:space:]]*true[[:space:
 # worktrees (.claude/worktrees), dependency and build output (node_modules, .venv,
 # venv, target, dist, build, .next, .turbo, .nx, __pycache__). Only .git entries at
 # depth 2 to 6 are considered (no -mindepth: it would also disable the prunes
-# above at depth 1; ./.git, the only depth 1 hit, is pruned already). A repo that cannot be
-# inspected is skipped (fail open).
+# above at depth 1; ./.git, the only depth 1 hit, is pruned already).
+# Known gaps: symlinked nested repos are not followed; a nested repo whose own
+# directory is named like a pruned one (build, dist, target, ...) is not found;
+# only the literal lowercase `recursive: true` enables discovery.
+# Fail open: a repo that cannot be inspected is skipped.
 # A .git found is skipped when it is:
-#   1. a worktree of the outer repo (same common git dir): outer status covers it
+#   1. a linked worktree of the outer repo (same common git dir): a separate
+#      checkout, usually an agent or parallel session with its own hook, which the
+#      hook deliberately ignores
 #   2. a submodule: the outer status already sees its pointer change
-#   3. a linked worktree of a repo that lives inside the project: that repo
-#      covers it (linked worktrees of repos OUTSIDE the project still count)
+#   3. a linked worktree of a repo that lives inside the project: ignored for the
+#      same reason as 1 (linked worktrees of repos OUTSIDE the project still count)
 #   4. a repo with its own .okf/ touched: it was maintained
 root=$(pwd -P)
-abs() { (cd "$1" 2>/dev/null && pwd -P); }
-outer_common=$(abs "$(git rev-parse --git-common-dir)")
+realdir() { (cd "$1" 2>/dev/null && pwd -P); }
+outer_common=$(realdir "$(git rev-parse --git-common-dir 2>/dev/null)")
+[ -n "$outer_common" ] || exit 0
 # the loop prints the dirty repos, one per line, and is captured: a pipeline
 # subshell cannot hand variables back
 dirty=$(find . -maxdepth 6 \( -path ./.git -o -path '*/.claude/worktrees' -o -name node_modules -o -name .venv -o -name venv -o -name target -o -name dist -o -name build -o -name .next -o -name .turbo -o -name .nx -o -name __pycache__ \) -prune \
   -o -name .git -print -prune 2>/dev/null | sort |
 while IFS= read -r g; do
   d=${g%/.git}
-  common=$(cd "$d" 2>/dev/null && abs "$(git rev-parse --git-common-dir 2>/dev/null)") || continue
+  common=$(cd "$d" 2>/dev/null && realdir "$(git rev-parse --git-common-dir 2>/dev/null)") || continue
   [ -n "$common" ] || continue
   [ "$common" = "$outer_common" ] && continue
   [ -n "$(git -C "$d" rev-parse --show-superproject-working-tree 2>/dev/null)" ] && continue
-  gitdir=$(cd "$d" && abs "$(git rev-parse --git-dir)")
+  gitdir=$(cd "$d" 2>/dev/null && realdir "$(git rev-parse --git-dir 2>/dev/null)") || continue
   if [ "$gitdir" != "$common" ]; then case "$common/" in "$root"/*) continue;; esac; fi
   if [ -d "$d/.okf" ] && [ -n "$(git -C "$d" status --porcelain -- .okf 2>/dev/null)" ]; then continue; fi
   [ -n "$(tracked_changes "$d")" ] && printf '%s\n' "${d#./}"

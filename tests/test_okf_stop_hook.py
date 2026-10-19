@@ -8,6 +8,7 @@ Run:  uv run tests/test_okf_stop_hook.py
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -249,7 +250,20 @@ class TestStopHook(unittest.TestCase):
     def test_path_with_space(self) -> None:
         self.set_recursive()
         self.dirty(self.add_nested("repos/with space"))
-        self.assertIn("nested repos: repos/with space)", self.hook_output())
+        out = self.hook_output()
+        self.assertIn("nested repos: repos/with space)", json.loads(out)["reason"])
+
+    @unittest.skipIf(os.name == "nt", "Windows cannot create such names")
+    def test_path_with_double_quote_is_escaped(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested('repos/q"uote'))
+        self.assertIn('repos/q"uote', json.loads(self.hook_output())["reason"])
+
+    @unittest.skipIf(os.name == "nt", "Windows cannot create such names")
+    def test_path_with_backslash_is_escaped(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("repos/back" + chr(92) + "slash"))
+        self.assertIn("repos/back" + chr(92) + "slash", json.loads(self.hook_output())["reason"])
 
     def test_nested_repo_with_own_bundle_change_passes(self) -> None:
         self.set_recursive()
