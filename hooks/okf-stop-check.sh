@@ -3,8 +3,8 @@
 # Fires only when BOTH hold:
 #   1. the repo's bundle opts in: `upkeep: enforced` in .okf/index.md frontmatter
 #   2. the user has not opted out: OKF_HOOK != "off"
-# Optional: `upkeep_repos: <glob>` or `[<glob>, ...]` in the same frontmatter names
-# nested git repos (relative to the project root) whose changes count too.
+# Optional: `recursive: true` in the same frontmatter makes the hook find nested git
+# repos by itself and count their uncommitted tracked changes too.
 input=$(cat)
 # loop guard in plain grep, no jq: if this line cannot run, the hook re-blocks forever
 printf '%s' "$input" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' && exit 0
@@ -23,47 +23,58 @@ tracked_changes() {
   git -C "$1" status --porcelain 2>/dev/null | grep -v '^??' \
     | grep -vE '^.. \.claude/settings(\.local)?\.json$'
 }
-changes=$(tracked_changes .)
-# Nested repos the bundle documents: a separate git repo checked out inside the
-# project (usually gitignored by the outer one) is invisible to the outer status.
-# Globs come from `upkeep_repos` in the frontmatter, a single value or a flow list.
-patterns=$(awk '/^---[[:space:]]*$/{n++;next}
-  n==1 && /^upkeep_repos:/ {
-    sub(/^upkeep_repos:[[:space:]]*/, ""); gsub(/[][\047"]/, "")
-    k = split($0, a, ",")
-    for (i = 1; i <= k; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[i]); if (a[i] != "") print a[i] }
-  }' .okf/index.md)
-nested=""
-default_ifs=$IFS
-while IFS= read -r pattern; do
-  IFS=   # expand the glob without splitting paths on spaces
-  for dir in $pattern; do
-    dir=${dir%/}
-    [ -d "$dir" ] || continue
-    [ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] || continue
-    # the repo must be rooted at $dir, not a plain subdirectory of the outer one
-    [ -z "$(git -C "$dir" rev-parse --show-cdup 2>/dev/null)" ] || continue
-    nested_changes=$(tracked_changes "$dir")
-    [ -n "$nested_changes" ] || continue
-    changes="$changes
-$nested_changes"
-    nested="${nested:+$nested, }$dir"
-  done
-  IFS=$default_ifs
-done <<PATTERNS
-$patterns
-PATTERNS
-[ -n "$changes" ] || exit 0
 # anything under .okf/ already touched, untracked included (a new concept starts
 # untracked) -> assume the bundle was maintained. Not log.md alone: it records
 # lifecycle events only, so most maintained changes never touch it.
 [ -n "$(git status --porcelain -- .okf 2>/dev/null)" ] && exit 0
-where=""
-if [ -n "$nested" ]; then
-  nested=${nested//\\/\\\\}
-  nested=${nested//\"/\\\"}
-  where=" (including changes in nested repos: $nested)"
-fi
-cat <<JSON
+block() {
+  where=""
+  if [ -n "$1" ]; then
+    nested=${1//\\/\\\\}
+    nested=${nested//\"/\\\"}
+    where=" (including changes in nested repos: $nested)"
+  fi
+  cat <<JSON
 {"decision":"block","reason":"This repo's .okf/ bundle declares \`upkeep: enforced\` and there are uncommitted changes$where, but nothing under .okf/ changed. If a documented asset changed, update the matching concept (body + generated); add a dated log.md entry only for a lifecycle event (creation, deprecation, supersession, regeneration, verification). If no documented asset changed, you may finish."}
 JSON
+  exit 0
+}
+# the outer repo is dirty: block now, no need to look for nested repos
+[ -n "$(tracked_changes .)" ] && block ""
+# nested-repo discovery is opt-in: `recursive: true` in the same frontmatter
+awk '/^---[[:space:]]*$/{n++;next} n==1 && /^recursive:[[:space:]]*true[[:space:]]*$/{f=1} END{exit !f}' .okf/index.md || exit 0
+# A separate git repo checked out inside the project (usually gitignored by the
+# outer one) is invisible to the outer status, so find them. The hook timeout is
+# 15 s and a naive find took over 13 s on a monorepo with dozens of nested
+# worktrees; pruning heavy dirs keeps it under 0.5 s. Pruned: .git, Claude Code
+# worktrees (.claude/worktrees), dependency and build output (node_modules, .venv,
+# venv, target, dist, build, .next, .turbo, .nx, __pycache__). Only .git entries at
+# depth 2 to 6 are considered (no -mindepth: it would also disable the prunes
+# above at depth 1; ./.git, the only depth 1 hit, is pruned already). A repo that cannot be
+# inspected is skipped (fail open).
+# A .git found is skipped when it is:
+#   1. a worktree of the outer repo (same common git dir): outer status covers it
+#   2. a submodule: the outer status already sees its pointer change
+#   3. a linked worktree of a repo that lives inside the project: that repo
+#      covers it (linked worktrees of repos OUTSIDE the project still count)
+#   4. a repo with its own .okf/ touched: it was maintained
+root=$(pwd -P)
+abs() { (cd "$1" 2>/dev/null && pwd -P); }
+outer_common=$(abs "$(git rev-parse --git-common-dir)")
+# the loop prints the dirty repos, one per line, and is captured: a pipeline
+# subshell cannot hand variables back
+dirty=$(find . -maxdepth 6 \( -path ./.git -o -path '*/.claude/worktrees' -o -name node_modules -o -name .venv -o -name venv -o -name target -o -name dist -o -name build -o -name .next -o -name .turbo -o -name .nx -o -name __pycache__ \) -prune \
+  -o -name .git -print -prune 2>/dev/null | sort |
+while IFS= read -r g; do
+  d=${g%/.git}
+  common=$(cd "$d" 2>/dev/null && abs "$(git rev-parse --git-common-dir 2>/dev/null)") || continue
+  [ -n "$common" ] || continue
+  [ "$common" = "$outer_common" ] && continue
+  [ -n "$(git -C "$d" rev-parse --show-superproject-working-tree 2>/dev/null)" ] && continue
+  gitdir=$(cd "$d" && abs "$(git rev-parse --git-dir)")
+  if [ "$gitdir" != "$common" ]; then case "$common/" in "$root"/*) continue;; esac; fi
+  if [ -d "$d/.okf" ] && [ -n "$(git -C "$d" status --porcelain -- .okf 2>/dev/null)" ]; then continue; fi
+  [ -n "$(tracked_changes "$d")" ] && printf '%s\n' "${d#./}"
+done)
+[ -n "$dirty" ] || exit 0
+block "$(printf '%s\n' "$dirty" | awk 'NR>1{printf ", "} {printf "%s", $0}')"

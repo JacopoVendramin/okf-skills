@@ -36,8 +36,8 @@ CommonMark does, so a regex class like `[^a-z]` in code is not a footnote); an
 `Attested Computation` declares a `runtime` and its path-valued `computation` / `executor.resource` / `attester.resource`
 resolve inside the bundle. Legacy `timestamp` and `# Citations` warn with their
 v0.2 replacement, per the [dual-read decision](/decisions/okf-v02-dual-read.md).
-The root `index.md` frontmatter carries only `okf_version`, `upkeep` or `upkeep_repos`
-(the Stop hook's opt-in flag and nested-repo globs ride along, so an
+The root `index.md` frontmatter carries only `okf_version`, `upkeep` or `recursive`
+(the Stop hook's opt-in flag and nested-repo switch ride along, so an
 enforced-upkeep bundle passes its own `--strict` run), and a declared `okf_version` matches the checked version.
 
 # The actor check (§7)

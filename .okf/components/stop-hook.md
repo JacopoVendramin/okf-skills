@@ -33,11 +33,14 @@ checked in order:
    `.claude/settings.json` and `.claude/settings.local.json`, are ignored even
    when tracked: `/plugin` writes the first, and no concept documents it.
    Every other tracked path under `.claude/` (commands, hooks, skills) counts.
-   The same rule applies to each nested repo named by `upkeep_repos` (see
-   [Activation](#activation)): their tracked changes join the outer repo's.
 6. nothing under `.okf/` is changed, untracked files included (a new concept
    starts untracked). Any bundle change means it was plausibly maintained this
    session, so the hook stays quiet.
+
+If the outer repo has tracked changes the hook blocks at once. Only otherwise,
+and only when the frontmatter also carries `recursive: true`, does it look for
+nested repos (see [Activation](#activation)); their tracked changes count by
+the same rule as gate 5.
 
 Only when all six hold does it block, asking the agent to update the matching
 concept before finishing, and to add a `log.md` entry only for a lifecycle
@@ -63,14 +66,33 @@ frontmatter. A user force-disables it regardless of bundle settings by
 setting `OKF_HOOK=off` in their environment.
 
 A bundle that documents separate git repos checked out *inside* the project
-(say `repos/devkit-fe/`, each its own repo, gitignored by the outer one) adds
-`upkeep_repos` to the same frontmatter: one line, a glob relative to the project
-root (`upkeep_repos: repos/*`) or a flow list (`upkeep_repos: [repos/*, vendor/lib]`,
-items may be quoted). Every match that is a git work tree rooted at that path
-has its tracked changes counted like the outer repo's; globs matching nothing
-and non-repos are skipped silently. When nested repos contribute changes, the
-block reason names them. Without the key nothing changes. The key is read only
-when `upkeep: enforced` is set, and the validator allows it in the root index.
+(say `repos/app/`, each its own repo, gitignored by the outer one) adds
+`recursive: true` to the same frontmatter: its own line, between the first two
+`---` lines, next to `upkeep: enforced`. The hook then finds nested repos by
+itself, with no list to maintain, and counts their tracked changes like the
+outer repo's. When nested repos contribute changes, the block reason names them
+(paths relative to the project root). Without the key nothing changes. It is
+read only when `upkeep: enforced` is set, and the validator allows it in the
+root index.
+
+Order matters for cost: the bundle-touched check runs first, then the outer
+repo's own changes (which block without any discovery), and only then the
+`recursive` flag and the `find`.
+
+Discovery runs `find` for `.git` entries at depth 2 to 6 (nested repos inside
+nested repos are found). The hook timeout is 15 s and an unpruned `find` took
+over 13 s on a monorepo with dozens of nested worktrees; pruning `.git`,
+`.claude/worktrees`, `node_modules`, `.venv`, `venv`, `target`, `dist`, `build`,
+`.next`, `.turbo`, `.nx` and `__pycache__` brings it under 0.5 s. A hit is
+skipped when it is:
+
+* a worktree of the outer repo (same common git dir): the outer status covers it;
+* a submodule: the outer status already sees its pointer change;
+* a linked worktree of a repo that lives inside the project: that repo covers
+  it (linked worktrees of repos *outside* the project still count);
+* a repo whose own `.okf/` has uncommitted changes: it was maintained.
+
+A repo that cannot be inspected is skipped (fail open).
 
 # The CI mirror
 
@@ -95,7 +117,7 @@ set of required status checks does not change.
   session satisfies gate 6 and silences the hook until it is committed. So does
   touching an unrelated concept: the gate checks that the bundle moved, not
   that the right concept did.
-* Committed changes in a nested repo are not seen, same as in the outer repo:
+* Discovery only sees repos whose `.git` sits at depth 2 to 6 and outside the pruned directories. Committed changes in a nested repo are not seen, same as in the outer repo:
   only uncommitted tracked modifications count.
 * Paths resolve from the session's working directory: a bundle not at
   `./.okf/` (monorepo subdirectory, session launched elsewhere) is never seen.

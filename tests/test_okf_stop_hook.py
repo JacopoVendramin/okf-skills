@@ -141,89 +141,163 @@ class TestStopHook(unittest.TestCase):
         self.assertIn("nothing under .okf/ changed", r.stdout)
         self.assertIn("only for a lifecycle event", r.stdout)
 
-    def set_upkeep_repos(self, value: str) -> None:
-        """Declare upkeep_repos in the root index and commit it with a gitignored repos/."""
-        (self.repo / ".okf/index.md").write_text(
-            f"---\nupkeep: enforced\nupkeep_repos: {value}\n---\n# Bundle\n")
+    def set_recursive(self, on: bool = True) -> None:
+        """Declare recursive in the root index and commit it with gitignored repos/."""
+        flag = "recursive: true\n" if on else ""
+        (self.repo / ".okf/index.md").write_text(f"---\nupkeep: enforced\n{flag}---\n# Bundle\n")
         (self.repo / ".gitignore").write_text("repos/\n")
         sh(self.repo, "git", "add", "-A")
-        sh(self.repo, "git", "commit", "-qm", "declare nested repos")
+        sh(self.repo, "git", "commit", "-qm", "declare recursive")
+
+    @staticmethod
+    def init_repo(path: Path) -> Path:
+        path.mkdir(parents=True)
+        sh(path, "git", "init", "-q")
+        sh(path, "git", "config", "user.email", "test@example.com")
+        sh(path, "git", "config", "user.name", "test")
+        (path / "lib.py").write_text("x = 1\n")
+        sh(path, "git", "add", "-A")
+        sh(path, "git", "commit", "-qm", "init")
+        return path
 
     def add_nested(self, rel: str) -> Path:
-        nested = self.repo / rel
-        nested.mkdir(parents=True)
-        sh(nested, "git", "init", "-q")
-        sh(nested, "git", "config", "user.email", "test@example.com")
-        sh(nested, "git", "config", "user.name", "test")
-        (nested / "lib.py").write_text("x = 1\n")
-        sh(nested, "git", "add", "-A")
-        sh(nested, "git", "commit", "-qm", "init")
+        return self.init_repo(self.repo / rel)
+
+    def dirty(self, nested: Path) -> Path:
+        (nested / "lib.py").write_text("x = 2\n")
         return nested
 
-    def hook_output(self) -> str:
+    def hook_output(self, **env: str) -> str:
+        base = {k: v for k, v in os.environ.items() if k != "OKF_HOOK"}
         r = subprocess.run(["bash", str(HOOK)], cwd=self.repo, input=INACTIVE,
-                           capture_output=True, text=True, check=False)
+                           capture_output=True, text=True, env={**base, **env}, check=False)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout
 
-    def test_nested_repo_change_blocks(self) -> None:
-        self.set_upkeep_repos("repos/*")
-        nested = self.add_nested("repos/fe")
-        self.assertFalse(self.run_hook())
-        (nested / "lib.py").write_text("x = 2\n")
-        self.assertTrue(self.run_hook())
-
-    def test_nested_change_with_bundle_change_passes(self) -> None:
-        self.set_upkeep_repos("repos/*")
-        (self.add_nested("repos/fe") / "lib.py").write_text("x = 2\n")
-        (self.repo / ".okf/a.md").write_text("---\ntype: Thing\n---\nB\n")
+    def test_recursive_absent_ignores_nested(self) -> None:
+        self.set_recursive(False)
+        self.dirty(self.add_nested("repos/app"))
         self.assertFalse(self.run_hook())
 
-    def test_nested_repo_not_listed_is_ignored(self) -> None:
-        self.set_upkeep_repos("vendor/*")
-        (self.add_nested("repos/fe") / "lib.py").write_text("x = 2\n")
+    def test_recursive_blocks_on_nested_change(self) -> None:
+        self.set_recursive()
+        nested = self.add_nested("repos/app")
         self.assertFalse(self.run_hook())
-
-    def test_flow_list_form(self) -> None:
-        self.set_upkeep_repos("[vendor/lib, repos/*]")
-        (self.add_nested("repos/fe") / "lib.py").write_text("x = 2\n")
-        self.assertTrue(self.run_hook())
-
-    def test_quoted_items(self) -> None:
-        self.set_upkeep_repos("['vendor/lib', \"repos/*\"]")
-        (self.add_nested("repos/fe") / "lib.py").write_text("x = 2\n")
-        self.assertTrue(self.run_hook())
-
-    def test_missing_glob_target_is_ignored(self) -> None:
-        self.set_upkeep_repos("[repos/*, vendor/lib]")
-        self.assertFalse(self.run_hook())
-
-    def test_plain_directory_is_not_a_nested_repo(self) -> None:
-        self.set_upkeep_repos("[repos/*, app]")
-        (self.repo / "app").mkdir()
-        (self.repo / "app/m.py").write_text("x = 1\n")
-        sh(self.repo, "git", "add", "-A")
-        sh(self.repo, "git", "commit", "-qm", "app")
-        self.assertFalse(self.run_hook())
-
-    def test_untracked_file_in_nested_repo_passes(self) -> None:
-        self.set_upkeep_repos("repos/*")
-        (self.add_nested("repos/fe") / "scratch.py").write_text("y = 1\n")
-        self.assertFalse(self.run_hook())
-
-    def test_block_reason_names_the_nested_repos(self) -> None:
-        self.set_upkeep_repos("repos/*")
-        (self.add_nested("repos/fe") / "lib.py").write_text("x = 2\n")
-        (self.add_nested("repos/be") / "lib.py").write_text("x = 2\n")
-        self.add_nested("repos/clean")
+        self.dirty(nested)
         out = self.hook_output()
-        self.assertIn("nested repos: repos/be, repos/fe", out)
-        self.assertNotIn("repos/clean", out)
+        self.assertIn('"decision":"block"', out)
+        self.assertIn("nested repos: repos/app)", out)
         self.assertEqual(out.count("\n"), 1)
 
-    def test_block_reason_without_nested_repos_is_unchanged(self) -> None:
+    def test_recursive_nested_with_bundle_change_passes(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("repos/app"))
+        (self.repo / ".okf/b.md").write_text("---\ntype: Thing\n---\nB\n")
+        self.assertFalse(self.run_hook())
+
+    def test_nested_inside_nested_blocks(self) -> None:
+        self.set_recursive()
+        app = self.add_nested("repos/app")
+        (app / ".gitignore").write_text("inner/\n")
+        sh(app, "git", "add", "-A")
+        sh(app, "git", "commit", "-qm", "ignore inner")
+        self.dirty(self.init_repo(app / "inner"))
+        self.assertIn("repos/app/inner", self.hook_output())
+
+    def test_outer_change_has_no_nested_part(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("repos/app"))
         self.edit_code()
-        self.assertNotIn("nested", self.hook_output())
+        out = self.hook_output()
+        self.assertIn('"decision":"block"', out)
+        self.assertNotIn("nested", out)
+
+    def test_outer_worktree_is_not_counted(self) -> None:
+        self.set_recursive()
+        wt = self.repo / ".claude/worktrees/wt"
+        sh(self.repo, "git", "worktree", "add", "-q", str(wt), "-b", "wt")
+        (wt / "code.py").write_text("x = 3\n")
+        self.assertFalse(self.run_hook())
+
+    def test_worktree_of_nested_repo_is_not_counted(self) -> None:
+        self.set_recursive()
+        app = self.add_nested("repos/app")
+        wt = self.repo / "repos/app-wt"
+        sh(app, "git", "worktree", "add", "-q", str(wt), "-b", "wt")
+        (wt / "lib.py").write_text("x = 3\n")
+        self.assertFalse(self.run_hook())
+        self.dirty(app)
+        out = self.hook_output()
+        self.assertIn("nested repos: repos/app)", out)
+        self.assertNotIn("app-wt", out)
+
+    def test_worktree_of_external_repo_is_counted(self) -> None:
+        self.set_recursive()
+        with tempfile.TemporaryDirectory() as ext_dir:
+            ext = self.init_repo(Path(ext_dir) / "src")
+            wt = self.repo / "repos/ext-wt"
+            sh(ext, "git", "worktree", "add", "-q", str(wt), "-b", "wt")
+            self.assertFalse(self.run_hook())
+            (wt / "lib.py").write_text("x = 3\n")
+            self.assertIn("repos/ext-wt", self.hook_output())
+
+    def test_node_modules_is_pruned(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("node_modules/pkg"))
+        self.assertFalse(self.run_hook())
+
+    def test_path_with_space(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("repos/with space"))
+        self.assertIn("nested repos: repos/with space)", self.hook_output())
+
+    def test_nested_repo_with_own_bundle_change_passes(self) -> None:
+        self.set_recursive()
+        app = self.dirty(self.add_nested("repos/app"))
+        (app / ".okf").mkdir()
+        (app / ".okf/a.md").write_text("---\ntype: Thing\n---\nA\n")
+        self.assertFalse(self.run_hook())
+
+    def test_settings_local_in_nested_repo_passes(self) -> None:
+        self.set_recursive()
+        app = self.add_nested("repos/app")
+        (app / ".claude").mkdir()
+        (app / ".claude/settings.local.json").write_text("{}\n")
+        sh(app, "git", "add", "-f", "-A")
+        sh(app, "git", "commit", "-qm", "settings")
+        (app / ".claude/settings.local.json").write_text('{"a": 1}\n')
+        self.assertFalse(self.run_hook())
+
+    def test_hook_off_overrides_recursive(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("repos/app"))
+        self.assertFalse(self.run_hook(OKF_HOOK="off"))
+
+    def test_clean_nested_repos_pass(self) -> None:
+        self.set_recursive()
+        self.add_nested("repos/app")
+        self.add_nested("repos/api")
+        self.assertFalse(self.run_hook())
+
+    def test_names_every_dirty_nested_repo(self) -> None:
+        self.set_recursive()
+        self.dirty(self.add_nested("repos/app"))
+        self.dirty(self.add_nested("repos/api"))
+        self.add_nested("repos/clean")
+        out = self.hook_output()
+        self.assertIn("nested repos: repos/api, repos/app)", out)
+        self.assertNotIn("repos/clean", out)
+
+    def test_submodule_is_not_counted(self) -> None:
+        self.set_recursive()
+        with tempfile.TemporaryDirectory() as sub_dir:
+            src = self.init_repo(Path(sub_dir) / "src")
+            sh(self.repo, "git", "-c", "protocol.file.allow=always",
+               "submodule", "add", "-q", str(src), "vendor/lib")
+            sh(self.repo, "git", "commit", "-qm", "add submodule")
+            self.dirty(self.repo / "vendor/lib")
+            # the outer status sees the submodule itself, so this blocks as an outer change
+            self.assertNotIn("nested", self.hook_output())
 
 
 if __name__ == "__main__":
